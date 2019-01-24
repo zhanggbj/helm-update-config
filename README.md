@@ -5,7 +5,7 @@ This plugin adds `helm update-config` command to Helm CLI. It allows to update c
 ## Install
 
 ```
-helm plugin install https://github.com/burdiyan/helm-update-config
+helm plugin install https://github.com/zhanggbj/helm-update-config
 ```
 
 ## Usage
@@ -13,7 +13,7 @@ helm plugin install https://github.com/burdiyan/helm-update-config
 To change image tag of `smiling-penguin` release:
 
 ```
-helm update-config smiling-penguin --set=image.tag=stable
+helm update-config smiling-penguin --set-value=image.tag=stable
 ```
 
 The plugin will reuse all the values defined in previous releases. If you want to override those you can set `--reset-values` flag the same way you do for `helm upgrade`.
