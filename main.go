@@ -16,7 +16,6 @@ import (
 type cmdFlags struct {
 	cliValues       []string
 	resetValues     bool
-	templateNumbers []string
 	valueFiles      valueFiles
 }
 
@@ -42,7 +41,7 @@ func main() {
 
 	cmd := &cobra.Command{
 		Use:   "helm update-config [flags] RELEASE",
-		Short: "update config values or templates of an existing release",
+		Short: "update config values of an existing release",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			vals := make(map[string]interface{})
@@ -90,10 +89,21 @@ func (cmd *updateConfigCommand) run() error {
 		return err
 	}
 
-	// TODO need to update
-	rawVals, err := rawValues(cmd.valueFiles, cmd.values)
+	var preVals map[string]interface{}
+	err = yaml.Unmarshal([]byte(ls.Releases[0].Config.Raw), &preVals)
 	if err != nil {
-		return err
+		return errors.Wrapf(err, "Failed to unmarshal raw values: %v", ls.Releases[0].Config.Raw)
+	}
+
+	updatedVals, err := generateUpdatedValues(cmd.valueFiles, cmd.values)
+	if err != nil {
+		return errors.Wrapf(err, "Failed to generate updated values: %v", updatedVals)
+	}
+
+	mergedVals := mergeValues(preVals, updatedVals)
+	valBytes, err := yaml.Marshal(mergedVals)
+	if err != nil {
+		return errors.Wrapf(err, "Failed to marshal merged values: %v", mergedVals)
 	}
 
 	var opt helm.UpdateOption
@@ -106,7 +116,7 @@ func (cmd *updateConfigCommand) run() error {
 	_, err = cmd.client.UpdateReleaseFromChart(
 		ls.Releases[0].Name,
 		ls.Releases[0].Chart,
-		helm.UpdateValueOverrides(rawVals),
+		helm.UpdateValueOverrides(valBytes),
 		opt,
 	)
 
@@ -118,7 +128,7 @@ func (cmd *updateConfigCommand) run() error {
 	return nil
 }
 
-// Merges destination and source map, preferring values from the source map
+// mergeValues merges destination and source map, preferring values from the source map
 func mergeValues(dest map[string]interface{}, src map[string]interface{}) map[string]interface{} {
 	for k, v := range src {
 		// If the key doesn't exist, then just set the key to that value
@@ -127,29 +137,42 @@ func mergeValues(dest map[string]interface{}, src map[string]interface{}) map[st
 			continue
 		}
 
-		nextMap, ok := v.(map[string]interface{})
+		nextMap, ok := v.(map[interface{}]interface{})
 		// If it isn't another map, overwrite the value
 		if !ok {
 			dest[k] = v
 			continue
 		}
 
+		// Convert nextMap key as string
+		convertedNextMap := map[string]interface{}{}
+		for k,v := range nextMap {
+			convertedNextMap[k.(string)] = v
+		}
+
 		// Edge case: If the key exists in the destination, but isn't a map
-		destMap, isMap := dest[k].(map[string]interface{})
+		destMap, isMap := dest[k].(map[interface{}]interface{})
 		// If the source map has a map for this key, prefer it
 		if !isMap {
 			dest[k] = v
 			continue
 		}
-		// If they are bosh map, merge them
-		dest[k] = mergeValues(destMap, nextMap)
+
+		// Convert destMap key as string
+		convertedDestMap := map[string]interface{}{}
+		for k,v := range destMap{
+			convertedDestMap[k.(string)] = v
+		}
+
+		// If they are both map, merge them
+		dest[k] = mergeValues(convertedDestMap, convertedNextMap)
 	}
 
 	return dest
 }
 
-// rawValues generates values from files specified via -f/--values and directly via --set-values
-func rawValues(valueFiles valueFiles, values []string) ([]byte, error) {
+// generateUpdatedValues generates values from files specified via -f/--values and directly via --set-values, preferring values via --set-values
+func generateUpdatedValues(valueFiles valueFiles, values []string) (map[string]interface{}, error) {
 	base := map[string]interface{}{}
 
 	// User specified a values files via -f/--values
@@ -162,22 +185,22 @@ func rawValues(valueFiles valueFiles, values []string) ([]byte, error) {
 		bytes, err = ioutil.ReadFile(filePath)
 
 		if err != nil {
-			return []byte{}, err
+			return map[string]interface{}{}, err
 		}
 
 		if err := yaml.Unmarshal(bytes, &currentMap); err != nil {
-			return []byte{}, fmt.Errorf("failed to parse %s: %s", filePath, err)
+			return map[string]interface{}{}, fmt.Errorf("failed to parse %s: %s", filePath, err)
 		}
 		// Merge with the previous map
 		base = mergeValues(base, currentMap)
 	}
 
-	// User specified a value via --set
+	// User specified a value via --set-value
 	for _, value := range values {
 		if err := strvals.ParseInto(value, base); err != nil {
-			return []byte{}, fmt.Errorf("failed parsing --set data: %s", err)
+			return map[string]interface{}{}, fmt.Errorf("failed parsing --set-value data: %s", err)
 		}
 	}
 
-	return yaml.Marshal(base)
+	return base, nil
 }
