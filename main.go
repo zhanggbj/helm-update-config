@@ -2,28 +2,50 @@ package main
 
 import (
 	"fmt"
+	"io/ioutil"
 	"os"
 	"strings"
 
+	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
 	yaml "gopkg.in/yaml.v1"
 	"k8s.io/helm/pkg/helm"
 	"k8s.io/helm/pkg/strvals"
 )
 
+type cmdFlags struct {
+	cliValues       []string
+	resetValues     bool
+	valueFiles      valueFiles
+}
+
+type valueFiles []string
+
+func (v *valueFiles) String() string {
+	return fmt.Sprint(*v)
+}
+
+func (v *valueFiles) Type() string {
+	return "valueFiles"
+}
+
+func (v *valueFiles) Set(value string) error {
+	for _, filePath := range strings.Split(value, ",") {
+		*v = append(*v, filePath)
+	}
+	return nil
+}
+
 func main() {
-	var (
-		cliValues   []string
-		resetValues bool
-	)
+	var flags cmdFlags
 
 	cmd := &cobra.Command{
 		Use:   "helm update-config [flags] RELEASE",
-		Short: "update config values or templates of an existing release",
+		Short: "update config values of an existing release",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			vals := make(map[string]interface{})
-			for _, v := range cliValues {
+			for _, v := range flags.cliValues {
 				if err := strvals.ParseInto(v, vals); err != nil {
 					return err
 				}
@@ -32,17 +54,19 @@ func main() {
 			update := updateConfigCommand{
 				client:      helm.NewClient(helm.Host(os.Getenv("TILLER_HOST"))),
 				release:     args[0],
-				values:      vals,
-				resetValues: resetValues,
+				values:      flags.cliValues,
+				valueFiles:  flags.valueFiles,
+				resetValues: flags.resetValues,
 			}
 
 			return update.run()
 		},
 	}
 
-	cmd.Flags().StringArrayVar(&cliValues, "set-value", []string{}, "set values on the command line (can specify multiple or separate values with commas: key1=val1,key2=val2)")
-	cmd.Flags().BoolVar(&resetValues, "reset-values", false, "when upgrading, reset the values to the ones built into the chart")
-
+	cmd.Flags().StringArrayVar(&flags.cliValues, "set-value", []string{}, "set values on the command line (can specify multiple or separate values with commas: key1=val1,key2=val2)")
+	cmd.Flags().BoolVar(&flags.resetValues, "reset-values", false, "when upgrading, reset the values to the ones built into the chart")
+	cmd.Flags().VarP(&flags.valueFiles, "values", "f", "specify values in a YAML file")
+	
 	if err := cmd.Execute(); err != nil {
 		os.Exit(1)
 	}
@@ -51,7 +75,8 @@ func main() {
 type updateConfigCommand struct {
 	client      helm.Interface
 	release     string
-	values      map[string]interface{}
+	values      []string
+	valueFiles  valueFiles
 	resetValues bool
 }
 
@@ -64,9 +89,22 @@ func (cmd *updateConfigCommand) run() error {
 		return err
 	}
 
-	var base map[interface{}]interface{}
-	yaml.Unmarshal([]byte(ls.Releases[0].Config.Raw), &base)
-	dest := mergeValues(base, cmd.values)
+	var preVals map[string]interface{}
+	err = yaml.Unmarshal([]byte(ls.Releases[0].Config.Raw), &preVals)
+	if err != nil {
+		return errors.Wrapf(err, "Failed to unmarshal raw values: %v", ls.Releases[0].Config.Raw)
+	}
+
+	preferredVals, err := generateUpdatedValues(cmd.valueFiles, cmd.values)
+	if err != nil {
+		return errors.Wrapf(err, "Failed to generate preferred values: %v", preferredVals)
+	}
+
+	mergedVals := mergeValues(preVals, preferredVals)
+	valBytes, err := yaml.Marshal(mergedVals)
+	if err != nil {
+		return errors.Wrapf(err, "Failed to marshal merged values: %v", mergedVals)
+	}
 
 	var opt helm.UpdateOption
 	if cmd.resetValues {
@@ -75,23 +113,23 @@ func (cmd *updateConfigCommand) run() error {
 		opt = helm.ReuseValues(true)
 	}
 
-	newValues, _ := yaml.Marshal(dest)
 	_, err = cmd.client.UpdateReleaseFromChart(
 		ls.Releases[0].Name,
 		ls.Releases[0].Chart,
-		helm.UpdateValueOverrides(newValues),
+		helm.UpdateValueOverrides(valBytes),
 		opt,
 	)
 
 	if err != nil {
-		return fmt.Errorf("Error: failed to update release", err)
+		return errors.Wrapf(err, "Failed to update release")
 	}
 
 	fmt.Printf("Info: update successfully\n")
 	return nil
 }
 
-func mergeValues(dest map[interface{}]interface{}, src map[string]interface{}) map[interface{}]interface{} {
+// mergeValues merges destination and source map, preferring values from the source map
+func mergeValues(dest map[string]interface{}, src map[string]interface{}) map[string]interface{} {
 	for k, v := range src {
 		// If the key doesn't exist, then just set the key to that value
 		if _, exists := dest[k]; !exists {
@@ -99,7 +137,7 @@ func mergeValues(dest map[interface{}]interface{}, src map[string]interface{}) m
 			continue
 		}
 
-		nextMap, ok := v.(map[string]interface{})
+		nextMap, ok := v.(map[interface{}]interface{})
 		// If it isn't another map, overwrite the value
 		if !ok {
 			dest[k] = v
@@ -113,9 +151,53 @@ func mergeValues(dest map[interface{}]interface{}, src map[string]interface{}) m
 			dest[k] = v
 			continue
 		}
-		// If they are bosh map, merge them
-		dest[k] = mergeValues(destMap, nextMap)
+
+		// If they are both map, merge them
+		dest[k] = mergeValues(convertKeyAsString(destMap), convertKeyAsString(nextMap))
 	}
 
 	return dest
+}
+
+// generateUpdatedValues generates values from files specified via -f/--values and directly via --set-values, preferring values via --set-values
+func generateUpdatedValues(valueFiles valueFiles, values []string) (map[string]interface{}, error) {
+	base := map[string]interface{}{}
+
+	// User specified a values files via -f/--values
+	for _, filePath := range valueFiles {
+		currentMap := map[string]interface{}{}
+
+		var bytes []byte
+		var err error
+
+		bytes, err = ioutil.ReadFile(filePath)
+
+		if err != nil {
+			return map[string]interface{}{}, err
+		}
+
+		if err := yaml.Unmarshal(bytes, &currentMap); err != nil {
+			return map[string]interface{}{}, fmt.Errorf("failed to parse %s: %s", filePath, err)
+		}
+		// Merge with the previous map
+		base = mergeValues(base, currentMap)
+	}
+
+	// User specified a value via --set-value
+	for _, value := range values {
+		if err := strvals.ParseInto(value, base); err != nil {
+			return map[string]interface{}{}, fmt.Errorf("failed parsing --set-value data: %s", err)
+		}
+	}
+
+	return base, nil
+}
+
+func convertKeyAsString(ori map[interface{}]interface{})map[string]interface{}{
+	result := map[string]interface{}{}
+	for k,v := range ori {
+		result[k.(string)] = v
+	}
+
+	return result
 }
