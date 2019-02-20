@@ -95,12 +95,12 @@ func (cmd *updateConfigCommand) run() error {
 		return errors.Wrapf(err, "Failed to unmarshal raw values: %v", ls.Releases[0].Config.Raw)
 	}
 
-	updatedVals, err := generateUpdatedValues(cmd.valueFiles, cmd.values)
+	preferredVals, err := generateUpdatedValues(cmd.valueFiles, cmd.values)
 	if err != nil {
-		return errors.Wrapf(err, "Failed to generate updated values: %v", updatedVals)
+		return errors.Wrapf(err, "Failed to generate preferred values: %v", preferredVals)
 	}
 
-	mergedVals := mergeValues(preVals, updatedVals)
+	mergedVals := mergeValues(preVals, preferredVals)
 	valBytes, err := yaml.Marshal(mergedVals)
 	if err != nil {
 		return errors.Wrapf(err, "Failed to marshal merged values: %v", mergedVals)
@@ -144,12 +144,6 @@ func mergeValues(dest map[string]interface{}, src map[string]interface{}) map[st
 			continue
 		}
 
-		// Convert nextMap key as string
-		convertedNextMap := map[string]interface{}{}
-		for k,v := range nextMap {
-			convertedNextMap[k.(string)] = v
-		}
-
 		// Edge case: If the key exists in the destination, but isn't a map
 		destMap, isMap := dest[k].(map[interface{}]interface{})
 		// If the source map has a map for this key, prefer it
@@ -158,14 +152,8 @@ func mergeValues(dest map[string]interface{}, src map[string]interface{}) map[st
 			continue
 		}
 
-		// Convert destMap key as string
-		convertedDestMap := map[string]interface{}{}
-		for k,v := range destMap{
-			convertedDestMap[k.(string)] = v
-		}
-
 		// If they are both map, merge them
-		dest[k] = mergeValues(convertedDestMap, convertedNextMap)
+		dest[k] = mergeValues(convertKeyAsString(destMap), convertKeyAsString(nextMap))
 	}
 
 	return dest
@@ -203,4 +191,13 @@ func generateUpdatedValues(valueFiles valueFiles, values []string) (map[string]i
 	}
 
 	return base, nil
+}
+
+func convertKeyAsString(ori map[interface{}]interface{})map[string]interface{}{
+	result := map[string]interface{}{}
+	for k,v := range ori {
+		result[k.(string)] = v
+	}
+
+	return result
 }
