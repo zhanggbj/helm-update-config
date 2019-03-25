@@ -11,12 +11,14 @@ import (
 	yaml "gopkg.in/yaml.v1"
 	"k8s.io/helm/pkg/helm"
 	"k8s.io/helm/pkg/strvals"
+	"k8s.io/helm/pkg/tlsutil"
 )
 
 type cmdFlags struct {
-	cliValues       []string
-	resetValues     bool
-	valueFiles      valueFiles
+	cliValues   []string
+	resetValues bool
+	valueFiles  valueFiles
+	useTLS      bool
 }
 
 type valueFiles []string
@@ -51,12 +53,29 @@ func main() {
 				}
 			}
 
+			options := []helm.Option{helm.Host(os.Getenv("TILLER_HOST"))}
+
+			tlsopts := tlsutil.Options{
+				ServerName:         os.Getenv("TILLER_HOST"),
+				KeyFile:            os.Getenv("HELM_HOME") + "/key.pem",  //helm_env.DefaultTLSKeyFile,
+				CertFile:           os.Getenv("HELM_HOME") + "/cert.pem", //helm_env.DefaultTLSCert,
+				InsecureSkipVerify: true,
+			}
+
+			tlscfg, err := tlsutil.ClientConfig(tlsopts)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(2)
+			}
+			options = append(options, helm.WithTLS(tlscfg))
+
 			update := updateConfigCommand{
-				client:      helm.NewClient(helm.Host(os.Getenv("TILLER_HOST"))),
+				client:      helm.NewClient(options...),
 				release:     args[0],
 				values:      flags.cliValues,
 				valueFiles:  flags.valueFiles,
 				resetValues: flags.resetValues,
+				useTLS:      flags.useTLS
 			}
 
 			return update.run()
@@ -66,7 +85,8 @@ func main() {
 	cmd.Flags().StringArrayVar(&flags.cliValues, "set-value", []string{}, "set values on the command line (can specify multiple or separate values with commas: key1=val1,key2=val2)")
 	cmd.Flags().BoolVar(&flags.resetValues, "reset-values", false, "when upgrading, reset the values to the ones built into the chart")
 	cmd.Flags().VarP(&flags.valueFiles, "values", "f", "specify values in a YAML file")
-	
+	cmd.Flags().BoolVar(&flags.useTLS, "tls", "false", "Use TLS in helm Client interactions")
+
 	if err := cmd.Execute(); err != nil {
 		os.Exit(1)
 	}
@@ -78,6 +98,7 @@ type updateConfigCommand struct {
 	values      []string
 	valueFiles  valueFiles
 	resetValues bool
+	useTLS      bool
 }
 
 func (cmd *updateConfigCommand) run() error {
@@ -193,9 +214,9 @@ func generateUpdatedValues(valueFiles valueFiles, values []string) (map[string]i
 	return base, nil
 }
 
-func convertKeyAsString(ori map[interface{}]interface{})map[string]interface{}{
+func convertKeyAsString(ori map[interface{}]interface{}) map[string]interface{} {
 	result := map[string]interface{}{}
-	for k,v := range ori {
+	for k, v := range ori {
 		result[k.(string)] = v
 	}
 
