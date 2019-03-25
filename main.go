@@ -55,19 +55,21 @@ func main() {
 
 			options := []helm.Option{helm.Host(os.Getenv("TILLER_HOST"))}
 
-			tlsopts := tlsutil.Options{
-				ServerName:         os.Getenv("TILLER_HOST"),
-				KeyFile:            os.Getenv("HELM_HOME") + "/key.pem",  //helm_env.DefaultTLSKeyFile,
-				CertFile:           os.Getenv("HELM_HOME") + "/cert.pem", //helm_env.DefaultTLSCert,
-				InsecureSkipVerify: true,
-			}
+			if flags.useTLS {
+				tlsopts := tlsutil.Options{
+					ServerName:         os.Getenv("TILLER_HOST"),
+					KeyFile:            os.Getenv("HELM_HOME") + "/key.pem",  //helm_env.DefaultTLSKeyFile,
+					CertFile:           os.Getenv("HELM_HOME") + "/cert.pem", //helm_env.DefaultTLSCert,
+					InsecureSkipVerify: true,
+				}
 
-			tlscfg, err := tlsutil.ClientConfig(tlsopts)
-			if err != nil {
-				fmt.Fprintln(os.Stderr, err)
-				os.Exit(2)
+				tlscfg, err := tlsutil.ClientConfig(tlsopts)
+				if err != nil {
+					fmt.Fprintln(os.Stderr, err)
+					os.Exit(2)
+				}
+				options = append(options, helm.WithTLS(tlscfg))
 			}
-			options = append(options, helm.WithTLS(tlscfg))
 
 			update := updateConfigCommand{
 				client:      helm.NewClient(options...),
@@ -75,7 +77,7 @@ func main() {
 				values:      flags.cliValues,
 				valueFiles:  flags.valueFiles,
 				resetValues: flags.resetValues,
-				useTLS:      flags.useTLS
+				useTLS:      flags.useTLS,
 			}
 
 			return update.run()
@@ -85,7 +87,7 @@ func main() {
 	cmd.Flags().StringArrayVar(&flags.cliValues, "set-value", []string{}, "set values on the command line (can specify multiple or separate values with commas: key1=val1,key2=val2)")
 	cmd.Flags().BoolVar(&flags.resetValues, "reset-values", false, "when upgrading, reset the values to the ones built into the chart")
 	cmd.Flags().VarP(&flags.valueFiles, "values", "f", "specify values in a YAML file")
-	cmd.Flags().BoolVar(&flags.useTLS, "tls", "false", "Use TLS in helm Client interactions")
+	cmd.Flags().BoolVar(&flags.useTLS, "tls", false, "Use TLS in helm Client interactions")
 
 	if err := cmd.Execute(); err != nil {
 		os.Exit(1)
